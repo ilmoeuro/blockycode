@@ -1,11 +1,15 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE TupleSections #-}
 {-----------------------------------------------------------------------------
     reactive-banana
     
     Example: Actuate and pause an event network acting as a counter
 ------------------------------------------------------------------------------}
+import           Data.Maybe
+import           Data.List
+import           Data.Traversable
 import           Control.Monad      (when, guard, forM_)
 import           Control.Monad.Fix
 import           Graphics.UI.WX     hiding (Attr, Event)
@@ -15,50 +19,69 @@ import           Reactive.Banana.WX
 import           System.IO
 import           Debug.Trace
 
-insideBox :: (Point, Size) -> Point -> Bool
-insideBox (Point x y, Size w h) (Point x' y') =
-        insideX && insideY
+unaccumE :: forall a b m.  (MonadMoment m, MonadFix m)
+         => (a -> a -> b)
+         -> a
+         -> Event a
+         -> m (Event (a,b))
+unaccumE f init evt = mdo
+    let result :: Event (a,b)
+        result = (\(x,_) x' -> (x', x `f` x')) <$> state <@> evt
+    state <- stepper (init,undefined) result
+    return result
+
+(<$$>) :: Functor f => f a -> (a -> b) -> f b
+(<$$>) = flip (<$>)
+
+data IsDragging = Dragging | NotDragging deriving (Eq)
+instance Monoid IsDragging where
+    mempty = NotDragging
+    mappend = flip const
+
+eclick :: Event EventMouse -> Event Point
+eclick = fmap mousePos . filterE click where
+    click (MouseLeftDown _ _) = True
+    click _                   = False
+
+edrag :: (MonadMoment m, MonadFix m)
+      => Event EventMouse
+      -> m (Event (Point, Vector))
+edrag evt =  onlyDragging
+         <$> unaccumE
+                (\(_,p) (i,p') -> p `vecBetween` p')
+                (pure (pt 0 0))
+                (pure getPos <@> evt)
     where
-        insideX = x <= x' && x' < x+w
-        insideY = y <= y' && y' < y+h
+        onlyDragging :: Event ((IsDragging,Point),Vector) -> Event (Point,Vector)
+        onlyDragging e =  (\((_,p),v) -> (p,v))
+                      <$> (filterE (\((d,_),_) -> d == Dragging) e)
+        getPos :: EventMouse -> (IsDragging, Point)
+        getPos (MouseLeftDrag p _)      = (Dragging, p)
+        getPos (MouseMiddleDrag p _)    = (Dragging, p)
+        getPos (MouseRightDrag p _)     = (Dragging, p)
+        getPos x                        = (NotDragging, mousePos x)
 
-data FollowHold = Follow | Hold deriving (Show, Eq, Enum, Bounded)
+hittest :: [Rect]
+        -> Rect
+        -> Point
+        -> Bool
+hittest rs r pt = (== [r])
+                . take 1
+                . reverse -- TODO optimize
+                . filter (`rectContains` pt)
+                $ rs
 
-followAndHold :: MonadMoment m => FollowHold -> Behavior a -> Event FollowHold -> m (Behavior a)
-followAndHold initToggle behavior etoggle = do
-    init <- valueBLater behavior
-    sampled <- stepper init (behavior <@ etoggle)
-    let toggle Follow = behavior
-        toggle Hold = sampled
-    switchB (toggle initToggle) (toggle <$> etoggle)
+draggable :: Event (Point, Vector)
+          -> Event ([Rect] -> [Rect])
+draggable = fmap $ \(point,delta) rects -> rects <$$> \rect ->
+    if hittest rects rect point then rect `rectMove` delta else rect
 
-data DragEvent = StartDrag Point | StopDrag Point deriving (Show)
-
-draggable :: (MonadFix m, MonadMoment m)
-          => (Point,Size)
-          -> Event EventMouse
-          -> m (Event DragEvent, Behavior Point)
-draggable (initPos,size@(Size w h)) events = mdo
-        position <- do
-            mousePos <- accumB initPos (pos <$> events)
-            followAndHold Hold mousePos (filterJust (toggle <$> position <@> events))
-        let event = dragEvent <$> position <@> events
-        return (filterJust event, position)
-    where
-        centerVector = Vector (-w `div` 2) (-h `div` 2)
-        pos (MouseLeftDrag p' _) p = pointMove centerVector p'
-        pos (MouseMotion p' _)   p = pointMove centerVector p'
-        pos _                    p = p
-        toggle p (MouseLeftDown p' _)
-            | insideBox (p,size) p'   = Just Follow
-        toggle p (MouseLeftUp p' _)
-            | insideBox (p,size) p'   = Just Hold
-        toggle _ _                    = Nothing
-        dragEvent p (MouseLeftDown p' _)
-            | insideBox (p,size) p'   = Just (StartDrag p')
-        dragEvent p (MouseLeftUp p' _)
-            | insideBox (p,size) p'   = Just (StopDrag p')
-        dragEvent _ _                 = Nothing
+bringToFront :: Event Point
+             -> Event ([Rect] -> [Rect])
+bringToFront = fmap $ \p rs -> uncurry (flip (++))
+                             . traceShowId 
+                             . partition (\r -> hittest rs r p)
+                             $ rs
         
 height, width :: Int
 height   = 400
@@ -76,31 +99,35 @@ main = start $ do
     -- event network
     let networkDescription :: MomentIO ()
         networkDescription = mdo
-            let boxw = 50
-                boxh = 50
-                boxes = [(50,50), (120, 50), (50, 120), (120, 120)]
-
             emouse <-
                 event1 pp mouse
 
-            draggables <-
-                mapM
-                    (\(x,y) -> draggable (Point x y, Size boxw boxh) emouse)
-                    boxes
+            edrag' <-
+                edrag emouse
 
-            let bpositions = sequenceA . map snd $ draggables
-            let edrag = foldr (unionWith const) never (map fst draggables)
-            
-            let drawBox :: Point -> DC a -> b -> IO ()
-                drawBox Point{pointX,pointY} dc _ =
-                    drawRect dc (Rect pointX pointY boxw boxh) []
-                drawBoxes :: [Point] -> DC a -> b -> IO ()
+            let eclick' = eclick emouse
+                initRects = [Rect 50 50 50 50
+                            ,Rect 120 50 50 50
+                            ,Rect 50 120 50 50
+                            ,Rect 120 120 50 50
+                            ]
+
+            brects <-
+                accumB initRects $ unions
+                    [draggable edrag'
+                    ,bringToFront eclick'
+                    ]
+
+            let drawBox :: Rect -> DC a -> b -> IO ()
+                drawBox rect dc _ =
+                    drawRect dc rect []
+                drawBoxes :: [Rect] -> DC a -> b -> IO ()
                 drawBoxes boxes dc v = forM_ boxes $ \b -> drawBox b dc v
         
             -- animate the sprite
-            sink pp [on paint :== drawBoxes <$> bpositions]
+            sink pp [on paint :== drawBoxes <$> brects]
             reactimate $ repaint pp <$ emouse
-            reactimate $ print <$> edrag
+            reactimate $ print <$> edrag'
     
     network <- compile networkDescription    
     actuate network
