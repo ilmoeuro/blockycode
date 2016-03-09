@@ -17,7 +17,10 @@ cabal-version:       >=1.10
 
 executable blocky8266
   main-is:             Main.hs
-  -- other-modules:       
+  other-modules:       Blocky.Interactions,
+                       Blocky.Input,
+                       Blocky.Common,
+                       Reactive.Banana.WX
   -- other-extensions:    
   build-depends:       base >=4.8 && <4.9,
                        lens,

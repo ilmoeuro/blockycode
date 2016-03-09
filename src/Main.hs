@@ -1,12 +1,13 @@
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecursiveDo         #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE RecursiveDo #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TupleSections       #-}
+module Main where
 import           Control.Lens             (Lens', each, filtered, folded,
                                            makeLenses, mapped, over, toListOf,
-                                           view, _1, _2, _3)
+                                           view, _1, _2, _3, _4)
 import           Data.Ord
 import           Data.Function
 import           Control.Monad            (forM_, guard, when)
@@ -20,80 +21,11 @@ import qualified Graphics.UI.WX           as WX
 import           Reactive.Banana
 import           Reactive.Banana.WX
 import           System.IO
+import           System.IO.Unsafe
+import           Blocky.Common
+import           Blocky.Interactions
+import           Blocky.Input
 
-unaccumE :: forall a b m.  (MonadMoment m, MonadFix m)
-         => (a -> a -> b)
-         -> a
-         -> Event a
-         -> m (Event (a,b))
-unaccumE f init evt = mdo
-    let result :: Event (a,b)
-        result = (\(x,_) x' -> (x', x `f` x')) <$> state <@> evt
-    state <- stepper (init,undefined) result
-    return result
-
-(<$$>) :: Functor f => f a -> (a -> b) -> f b
-(<$$>) = flip (<$>)
-
-data IsDragging = Dragging | NotDragging deriving (Eq)
-instance Monoid IsDragging where
-    mempty = NotDragging
-    mappend = flip const
-
-clicks :: Event EventMouse -> Event Point
-clicks = fmap mousePos . filterE click where
-    click (MouseLeftDown _ _) = True
-    click _                   = False
-
-drags :: (MonadMoment m, MonadFix m) => Event EventMouse -> m (Event (Point, Vector))
-drags evt =  onlyDragging
-         <$> unaccumE
-                (\(_,p) (i,p') -> p `vecBetween` p')
-                (pure (pt 0 0))
-                (pure getPos <@> evt)
-    where
-        onlyDragging :: Event ((IsDragging,Point),Vector) -> Event (Point,Vector)
-        onlyDragging e =  (\((_,p),v) -> (p,v))
-                      <$> filterE (\((d,_),_) -> d == Dragging) e
-        getPos :: EventMouse -> (IsDragging, Point)
-        getPos (MouseLeftDrag p _)      = (Dragging, p)
-        getPos (MouseMiddleDrag p _)    = (Dragging, p)
-        getPos (MouseRightDrag p _)     = (Dragging, p)
-        getPos x                        = (NotDragging, mousePos x)
-
-type VisualId = Int
-type ZIndex = Int
-type Visual = (VisualId, ZIndex, Rect)
-
-hittest' :: ([Visual] -> [Visual])
-         -> (a -> Point)
-         -> VisualId
-         -> Behavior [Visual]
-         -> Event a
-         -> Event a
-hittest' f pointOf oid objs evt = snd <$> filterE flt ((,) <$> objs <@> evt)
-    where
-        flt (objs,x) = any ((== oid) . view _1)
-                     . f
-                     . sortBy (comparing (view _2))
-                     . filter ((`rectContains` pointOf x) . view _3)
-                     $ objs
-
-hittestFront :: (a -> Point) -> VisualId -> Behavior [Visual] -> Event a -> Event a
-hittestFront = hittest' (take 1)
-
-hittestBack :: (a -> Point) -> VisualId -> Behavior [Visual] -> Event a -> Event a
-hittestBack = hittest' (drop 1)
-
-draggable :: Event (a, Vector) -> Event (Visual -> Visual)
-draggable = fmap $ \(_,delta) -> over _3 (`rectMove` delta)
-
-bringToFront :: Event a -> Event (Visual -> Visual)
-bringToFront = fmap $ \_ (oid,_,r) -> (oid, 0, r)
-
-sendBackwards :: Event a -> Event (Visual -> Visual)
-sendBackwards = fmap $ \_ (oid,z,r) -> (oid,z+1,r)
-        
 height, width :: Int
 height   = 400
 width    = 400
@@ -103,6 +35,9 @@ makeLenses ''Box
 
 main :: IO ()
 main = start $ do
+
+    hSetBuffering stdout NoBuffering
+
     ff <- frame [ text       := "It's functional programming time"
                 , bgcolor    := white
                 ]
@@ -120,45 +55,40 @@ main = start $ do
                 drags emouse
 
             let eclick = clicks emouse
-                initBoxes = [Box (1,0,Rect 50 50 50 50) blue
-                            ,Box (2,1,Rect 50 120 50 50) red
-                            ,Box (3,2,Rect 120 50 50 50) green
-                            ,Box (4,3,Rect 120 120 50 50) grey
+                erelease = releases emouse
+                initBoxes = [Box (1,0,Rect 50 50 50 50,False) blue
+                            ,Box (2,1,Rect 50 120 50 50,False) red
+                            ,Box (3,2,Rect 120 50 50 50,False) green
+                            ,Box (4,3,Rect 120 120 50 50,False) grey
                             ]
 
             (bboxes :: Behavior [Box]) <- mfix $ \bboxes' ->
                 fmap sequenceA <$> forM initBoxes $ \box ->
-                    accumB box (unions
-                        [    over visual 
-                         <$> (draggable
-                          .  hittestFront
-                                (\(p,v) -> pointMove (vecNegate v) p)
-                                (view (visual._1) box) 
-                                (toListOf (each.visual) <$> bboxes')
-                          $  edrag)
-                        ,    over visual
-                         <$> (bringToFront
-                          .  hittestFront
-                                id 
-                                (view (visual._1) box) 
-                                (toListOf (each.visual) <$> bboxes')
-                          $  eclick)
-                        ,    over visual
-                         <$> sendBackwards eclick
-                        ])
+                    let hittest' = hittest
+                                    id 
+                                    (view (visual._1) box) 
+                                    (toListOf (each.visual) <$> bboxes')
+                        eclickme = hittest' eclick
+                    in accumB box . unions . map (over visual <$>) $
+                        [ draggable edrag
+                        , startDrag eclickme
+                        , stopDrag erelease
+                        , bringToFront eclickme
+                        , sendBackwards eclick
+                        ]
 
             let drawBox :: Box -> DC a -> b -> IO ()
-                drawBox (Box (_,_,rect) c) dc _ =
+                drawBox (Box (_,_,rect,_) c) dc _ =
                     drawRect dc rect [color := c, bgcolor := c]
                 drawBoxes :: [Box] -> DC a -> b -> IO ()
-                drawBoxes boxes dc v = forM_
-                                        (sortBy (comparing (Down . view (visual._2))) boxes)
-                                     $ \b -> drawBox b dc v
+                drawBoxes boxes dc v =
+                    forM_
+                        (sortBy (comparing (Down . view (visual._2))) boxes)
+                    $ \b -> drawBox b dc v
         
             -- animate the sprite
             sink pp [WX.on paint :== drawBoxes <$> bboxes]
             reactimate $ repaint pp <$ emouse
-            reactimate $ print <$> edrag
     
     network <- compile networkDescription    
     actuate network
