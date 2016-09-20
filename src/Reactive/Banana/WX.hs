@@ -33,8 +33,8 @@ import qualified Graphics.UI.WXCore as WXCore
 ------------------------------------------------------------------------------}
 -- | Event with exactly one parameter.
 event1 :: w -> WX.Event w (a -> IO ()) -> MomentIO (Event a)
-event1 widget e = do
-    addHandler <- liftIO $ event1ToAddHandler widget e
+event1 widgy e = do
+    addHandler <- liftIO $ event1ToAddHandler widgy e
     fromAddHandler addHandler
 
     -- NOTE: Some events don't work, for instance   leftKey  and  rightKey
@@ -44,12 +44,12 @@ event1 widget e = do
 
 -- | Event without parameters.
 event0 :: w -> WX.Event w (IO ()) -> MomentIO (Event ())
-event0 widget = event1 widget . event0ToEvent1
+event0 widgy = event1 widgy . event0ToEvent1
 
 -- | Behavior from an attribute.
 -- Uses 'fromPoll', so may behave as you expect.
 behavior :: w -> WX.Attr w a -> MomentIO (Behavior a)
-behavior widget attr = fromPoll $ get widget attr
+behavior widgy attr = fromPoll $ get widgy attr
 
 -- | Variant of wx properties that accept a 'Behavior'.
 data Prop' w = forall a. (WX.Attr w a) :== Behavior a
@@ -58,13 +58,13 @@ infixr 0 :==
 
 -- | "Animate" a property with a behavior
 sink :: w -> [Prop' w] -> MomentIO ()
-sink widget = mapM_ sink1
+sink widgy = mapM_ sink1
     where
     sink1 (attr :== b) = do
         x <- valueBLater b
-        liftIOLater $ set widget [attr := x]
+        liftIOLater $ set widgy [attr := x]
         e <- changes b
-        reactimate' $ (fmap $ \x -> set widget [attr := x]) <$> e
+        reactimate' $ fmap (\p -> set widgy [attr := p]) <$> e
 
 {-----------------------------------------------------------------------------
     Specific widgets
@@ -114,9 +114,9 @@ fixSelectionEvent listbox =
 ------------------------------------------------------------------------------}
 -- | Obtain an 'AddHandler' from a 'WX.Event'.
 event1ToAddHandler :: w -> WX.Event w (a -> IO ()) -> IO (AddHandler a)
-event1ToAddHandler widget e = do
+event1ToAddHandler widgy e = do
     (addHandler, runHandlers) <- newAddHandler
-    set widget [on e :~ \h x -> h x >> runHandlers x]
+    set widgy [on e :~ \h x -> h x >> runHandlers x]
     return addHandler
 
 -- | Obtain an 'AddHandler' from a 'WX.Event'.

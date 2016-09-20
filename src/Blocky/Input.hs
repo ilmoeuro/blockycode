@@ -2,12 +2,15 @@ module Blocky.Input
     ( clicks
     , releases
     , drags
+    , Hidden(..)
     ) where
 
 import           Control.Monad.Fix
 import           Graphics.UI.WX           hiding (Attr, Event, on, click)
 import           Reactive.Banana
 import           Blocky.Common
+
+data Hidden = Exposed
 
 clicks :: Event EventMouse -> Event Point
 clicks = fmap mousePos . filterE click where

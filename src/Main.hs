@@ -16,7 +16,7 @@ import           Reactive.Banana
 import           Reactive.Banana.WX
 import           System.IO
 import           Blocky.Interactions
-import           Blocky.Input
+import           Blocky.Input             
 
 height, width :: Int
 height   = 400
@@ -30,7 +30,7 @@ main = start $ do
 
     hSetBuffering stdout NoBuffering
 
-    ff <- frame [ text       := "It's functional programming time"
+    ff <- frame [ text       := "blocky8266"
                 , bgcolor    := white
                 ]
 
